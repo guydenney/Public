@@ -1,0 +1,219 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "Launch an EC2 instance to perform auto-start, auto-stop of instances and Snapshot of ebs volumes.",
+  "Parameters" : {
+    "UtilSubnet" :{
+       "Description" : "subnet ID for instance to run",
+        "Type" : "String",
+      "Default" : "subnet-c8bb38bf"
+    },
+    "Region" :{
+       "Description" : "Region",
+        "Type" : "String",
+      "Default" : "us-east-1"
+    },
+    "APIEndpoint" :{
+       "Description" : "End Point for boto api",
+        "Type" : "String",
+      "Default" : "ec2.us-east-1.amazonaws.com"
+    },
+     "DayNumber" :{
+       "Description" : "The number of Days of Snapshots to retain",
+        "Type" : "Number",
+      "Default" : "7"
+    },
+    "WeekNumber" :{
+       "Description" : "The number of weeks of Snapshots to retain",
+        "Type" : "Number",
+      "Default" : "5"
+    },
+    "MonthNumber" :{
+       "Description" : "The number of months of Snapshots to retain",
+        "Type" : "Number",
+      "Default" : "13"
+    },
+  	"InstanceType" : {
+        "Description" : "Instance type for the EC2 Operator",
+        "Type" : "String",
+        "Default" : "t2.micro",
+        "ConstraintDescription" : "must be a valid EC2 instance type."
+    },
+  	"KeyName" : {
+        "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instance",
+        "Type" : "String",
+  	   "Default" : "uturn-prod"
+    },
+    "DefaultSG" : {
+        "Description" : "Security GroupID for instance",
+        "Type": "String",
+        "Default" : "sg-f6ff2892"
+    },
+    "EmailSNSAlarm" : {
+            "Description" : "List of Valid Emails for System alarms",
+            "Type": "String",
+            "Default" : "No@Email.org"
+    },
+    "AmiID" : {
+        "Description" : "AmiID for Instance",
+        "Type": "String",
+        "Default" : "ami-146e2a7c"
+    }
+  },
+
+  "Resources" : {
+  
+	"OperatorInstance" : {
+      "Type" : "AWS::EC2::Instance",
+      "Properties"     : {
+        "ImageId"      : { "Ref" : "AmiID" },
+        "InstanceType" : { "Ref" : "InstanceType" },
+        "SubnetId" : {  "Ref" : "UtilSubnet"  },
+        "IamInstanceProfile": {
+          "Ref": "OperatorInstanceProfile"
+        }, 		
+        "KeyName"      : { "Ref" : "KeyName" },
+        "SecurityGroupIds" : [{ "Ref" : "DefaultSG" }],	
+        "Tags" : [
+          {
+            "Key": "Name",
+            "Value": { "Fn::Join" : ["", ["Utility", { "Ref" : "AWS::StackName" }]]}
+          },
+          {
+            "Key" : "Role",
+            "Value" : "Utility"
+          }
+        ],
+  		  "UserData"     : { "Fn::Base64" : { "Fn::Join" : ["", [
+  		  "#!/bin/bash -v\n",
+        "yum install -y python26-pip gcc\n",
+  		  "pip install croniter\n",
+  		  "OPERATOR=/home/ec2-user/ec2_operator.py\n",
+  		  "wget -O $OPERATOR https://raw.githubusercontent.com/uturndata/Public/master/ec2_operator.py\n",
+  		  "chown ec2-user:ec2-user $OPERATOR\n",
+  		  "chmod 644 $OPERATOR\n",
+  		  "echo \"*/5 * * * * ec2-user python $OPERATOR > /home/ec2-user/ec2_operator.log 2>&1\" >> /etc/crontab\n",
+        "#Start Snapshot install\n",
+        "pip install boto\n",
+        "SNAPSHOTCONFIG=/home/ec2-user/config.py\n",
+        "SNAPSHOTCONFIGEX=/home/ec2-user/config.ex\n",
+        "SNAPSHOT=/home/ec2-user/makesnapshots.py\n",
+        "wget -O $SNAPSHOTCONFIG https://raw.githubusercontent.com/uturndata/Public/master/config.py\n",
+        "sed 's/ReplaceWithSNSARN/",{ "Ref": "StopStartSnapServerSNS" },"/' $SNAPSHOTCONFIG > $SNAPSHOTCONFIGEX\n",
+        "sed 's/RegonName/",{ "Ref": "Region" },"/' $SNAPSHOTCONFIGEX > $SNAPSHOTCONFIG\n",
+        "sed 's/RegonEndpoint/",{ "Ref": "APIEndpoint" },"/' $SNAPSHOTCONFIG > $SNAPSHOTCONFIGEX\n",
+        "sed 's/DayCount/",{ "Ref": "DayNumber" },"/' $SNAPSHOTCONFIGEX > $SNAPSHOTCONFIG\n",
+        "sed 's/WeekCount/",{ "Ref": "WeekNumber" },"/' $SNAPSHOTCONFIG > $SNAPSHOTCONFIGEX\n",
+        "sed 's/MonthCount/",{ "Ref": "MonthNumber" },"/' $SNAPSHOTCONFIGEX > $SNAPSHOTCONFIG\n",
+        "rm $SNAPSHOTCONFIGEX\n",
+        "wget -O $SNAPSHOT https://raw.githubusercontent.com/uturndata/Public/master/makesnapshots.py\n",
+        "chown ec2-user:ec2-user $SNAPSHOT\n",
+        "chmod 644 $SNAPSHOT\n",
+        "echo \"30 1 * * 1-5 ec2-user python $SNAPSHOT day > /home/ec2-user/makesnapshots.log 2>&1\" >> /etc/crontab\n",
+        "echo \"30 2 * * 6 ec2-user python $SNAPSHOT week > /home/ec2-user/makesnapshots.log 2>&1\" >> /etc/crontab\n",
+        "echo \"30 3 1 * * ec2-user python $SNAPSHOT month > /home/ec2-user/makesnapshots.log 2>&1\" >> /etc/crontab\n",
+        "yum -y update\n"
+  		  ]]}}
+	     }
+    },
+    "OperatorInstanceProfile" : {
+      "Properties": {
+        "Path": "/", 
+        "Roles": [
+          {
+            "Ref": "OperatorRole"
+          }
+        ]
+      }, 
+      "Type": "AWS::IAM::InstanceProfile"
+    }, 	
+    "ServerDown": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "AlarmDescription": "Server not available",
+                "MetricName": "StatusCheckFailed",
+                "Namespace": "AWS/EC2",
+                "Statistic": "Average",
+                "Period": "300",
+                "EvaluationPeriods": "1",
+                "Threshold": "1",
+                "AlarmActions": [ { "Ref": "StopStartSnapServerSNS" } ],
+                "InsufficientDataActions" : [ { "Ref": "StopStartSnapServerSNS" } ],
+                "Dimensions": [
+                    {
+                        "Name" : "InstanceId",
+                        "Value" :  { "Ref" : "OperatorInstance" }
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanThreshold"
+            }
+    },
+    "StopStartSnapServerSNS" : {
+            "Type" : "AWS::SNS::Topic",
+            "Properties" : {
+                "Subscription" : [ {
+                    "Endpoint" : { "Ref" : "EmailSNSAlarm" },
+                    "Protocol" : "email"
+                }]
+            }
+    },
+    "OperatorRole": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sts:AssumeRole"
+              ], 
+              "Effect": "Allow", 
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              }
+            }
+          ]
+        }, 
+        "Path": "/", 
+        "Policies": [
+          {
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Action": [
+				            "ec2:DescribeInstances",
+                    "ec2:StartInstances",
+                    "ec2:StopInstances",
+                    "ec2:CreateSnapshot",
+                    "ec2:CreateTags",
+                    "ec2:DeleteSnapshot",
+                    "ec2:DescribeAvailabilityZones",
+                    "ec2:DescribeSnapshots",
+                    "ec2:DescribeTags",
+                    "ec2:DescribeVolumeAttribute",
+                    "ec2:DescribeVolumeStatus",
+                    "ec2:DescribeVolumes",
+                    "sns:Publish"
+				          ], 
+                  "Effect": "Allow", 
+                  "Resource": "*"
+                }
+              ]
+            }, 
+            "PolicyName": "EC2OperatorPolicy"
+          }
+        ]
+      }, 
+      "Type": "AWS::IAM::Role"
+    }	
+  },
+
+  "Outputs" : {
+    "OperatorInstanceId" : {
+      "Value" : { "Ref" : "OperatorInstance" },
+      "Description" : "Instance Id of the ec2 instance"
+    }
+	
+  }
+  
+}
